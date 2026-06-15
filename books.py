@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-books_db = os.getenv("DB_CONNECTION_STRING")
+books_db = os.getenv("books_db")
 big_book_api_key = os.getenv("big_book_api_key")
 big_book_url = os.getenv("big_book_url")
 
