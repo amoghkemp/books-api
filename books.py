@@ -6,11 +6,14 @@ import urllib.parse
 import urllib.error
 import psycopg
 import re
+import os
+from dotenv import load_dotenv
 
-books_db = "dbname=bookstore user=postgres password=amogh123 host=localhost port=5432"
+load_dotenv()
 
-big_book_api_key = "743b3431655d4385be54ad639c49227c"
-big_book_url = "https://api.bigbookapi.com/search-books"
+books_db = os.getenv("DB_CONNECTION_STRING")
+big_book_api_key = os.getenv("big_book_api_key")
+big_book_url = os.getenv("big_book_url")
 
 class bookRequestsHandler(BaseHTTPRequestHandler):
 
