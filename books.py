@@ -7,6 +7,8 @@ import urllib.error
 import psycopg
 import re
 import os
+import jwt
+import datetime
 from dotenv import load_dotenv
 
 # Initialize dotenv to read keys from the local .env configuration file
@@ -16,6 +18,7 @@ load_dotenv()
 books_db = os.getenv("books_db")
 big_book_api_key = os.getenv("big_book_api_key")
 big_book_url = os.getenv("big_book_url")
+jwt_secret = os.getenv("JWT_SECRET", "fallback_secret_key")
 
 class bookRequestsHandler(BaseHTTPRequestHandler):
 
@@ -26,6 +29,23 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode('utf-8'))
 
+    def is_authorized(self):
+        auth_header = self.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith("Bearer "):
+            self.send_json({"detail": "Missingor invalid Authorization header. Format: 'Bearer <token>'"}, status_code = 401)
+            return False
+        
+        token = auth_header.split(" ")[1]
+        try:
+            jwt.decode(token, jwt_secret, algorithms=["HS256"])
+            return True
+        except jwt.ExpiredSignatureError:
+            self.send_json({"detail": "Token has expired. Please login again."}, status_code=401)
+            return False
+        except jwt.InvalidTokenError:
+            self.send_json({"detail": "Invalid token."}, status_code = 401)
+            return False
+
     # Entry point for processing all incoming HTTP GET requests
     def do_GET(self):
         parsed_url = urlparse(self.path)
@@ -35,10 +55,24 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         # 1. GET /books: Fetches and displays the entire local inventory sorted sequentially by ID
         if path == '/books':
             try:
+                # pagination logic. Default to page 1
+                try:
+                    page = int(query_params.get('page', ['1'])[0])
+                    limit = int(query_params.get('limit', ['5'])[0])
+                    if page < 1 or limit < 1:
+                        raise ValueError
+                except ValueError:
+                    self.send_json({"detail": "Page and limit must be positive integers."}, status_code = 400)
+                    return
+                
+                # calculates offset
+                offset = (page - 1) * limit
+
                 with psycopg.connect(books_db) as conn:
                     with conn.cursor() as cur:
-                        query = "Select id, title, author, genre FROM books ORDER by id ASC;"
-                        cur.execute(query)
+                        # pass limit and offset dynamically to SQL
+                        query = "Select id, title, author, genre FROM books ORDER by id ASC LIMIT %s OFFSET %s;"
+                        cur.execute(query, (limit, offset))
                         rows = cur.fetchall()
 
                         all_books = []
@@ -49,7 +83,12 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                                 "author": row[2],
                                 "genre": row[3]
                             })
-                        self.send_json(all_books)
+                        self.send_json({
+                            "page": page,
+                            "limit": limit,
+                            "total_returned": len(all_books),
+                            "results": all_books
+                        })
                         return
             except Exception as e:
                 print(f"Database error encountered: {e}")
@@ -66,10 +105,27 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
             requested_genre = genre_list[0]
 
             try:
+                # pagination logic
+                try:
+                    page = int(query_params.get('page', ['1'])[0])
+                    limit = int(query_params.get('limit', [5])[0])
+                    if page < 1 or limit < 1:
+                        raise ValueError
+                except ValueError:
+                    self.send_json({"detail": "Page and limit must be positive integers."}, status_code = 400)
+                    return
+                
+                offset = (page - 1) * limit 
+
                 with psycopg.connect(books_db) as conn:
                     with conn.cursor() as cur:
-                        query = "SELECT id, title, author, genre FROM books WHERE LOWER(genre) = LOWER(%s);"
-                        cur.execute(query, (requested_genre,))
+                        query = """
+                            SELECT id, title, author, genre FROM books
+                            WHERE LOWER(genre) = LOWER(%s)
+                            ORDER BY id ASC
+                            LIMIT %s OFFSET %s
+                        """
+                        cur.execute(query, (requested_genre, limit, offset))
                         rows = cur.fetchall()
 
                         recommendations = []
@@ -80,7 +136,13 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                                 "author": row[2],
                                 "genre": row[3]
                             })
-                        self.send_json(recommendations)
+                        self.send_json({
+                            "filter": requested_genre,
+                            "page": page,
+                            "limit": limit,
+                            "total_returned": len(recommendations),
+                            "results": recommendations
+                        })
                         return
             except Exception as e:
                 print(f"Database error encountered: {e}")
@@ -186,16 +248,46 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
 
     # Entry point for processing all incoming HTTP POST requests
     def do_POST(self):
-        # POST /books: Validates incoming payloads and saves a unique new book record to the local database
-        if self.path == '/books':
+        # /login - generates a JWT token for the user
+        if self.path == '/login':
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length).decode('utf-8')
 
             try:
                 data = json.loads(post_data)
-                if 'title' not in data or 'author' not in data or 'genre' not in data:
-                    self.send_json({"detail": "Missing required fields: title, author, or genre"}, status_code = 400)
+                # hardcoded dummey authentication check
+                if data.get("username") == "admin" and data.get("password") == "password123":
+                    # Create valid token for 1 hour
+                    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+                    token = jwt.encode({"user": "admin", "exp": expiration}, jwt_secret, algorithm="HS256")
+                    self.send_json({"message": "Login successfull", "access_token": token}, status_code = 200)
                     return
+                else:
+                    self.send_json({"detail": "Invalid username or password"}, status_code=401)
+                    return
+            except json.JSONDecodeError:
+                self.send_json({"detail": "Invalid JSON format in request body"}, status_code = 400)
+                return
+
+        elif self.path == '/books':
+            # protect this route
+            if not self.is_authorized():
+                return
+
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length).decode('utf-8')
+
+            try:
+                data = json.loads(post_data)
+
+                # Check if fields exist and if they are still valid text strings
+                for field in ['title', 'author', 'genre']:
+                    if field not in data:
+                        self.send_json({"detail": f"Missing required field: {field}"}, status_code = 400)
+                        return
+                    if not isinstance(data[field], str) or not data[field].strip():
+                        self.send_json({"detail": f"Field '{field}' must be a non-empty string."}, status_code=400)
+                        return
                 
                 input_title = data["title"]
                 input_author = data["author"]
@@ -260,6 +352,9 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
     
     # Entry point for processing all incoming HTTP DELETE requests
     def do_DELETE(self):
+        if not self.is_authorized():
+            return
+
         # DELETE /books: Locates matching values and purges them completely from table space
         if self.path == '/books':
             content_length = int(self.headers['Content-Length'])
@@ -267,12 +362,18 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
 
             try:
                 data = json.loads(delete_data)
-                if 'title' not in data or 'author' not in data or 'genre' not in data:
-                    self.send_json({"detail": "Missing required fields to delete: title, author, or genre"}, status_code = 400)
-                    return
-                input_title = data["title"]
-                input_author = data["author"]
-                input_genre = data["genre"]
+                # Validation checks
+                for field in ['title', 'author', 'genre']:
+                    if field not in data:
+                        self.send_json({"detail": f"Missing required field: {field}"}, status_code=400)
+                        return
+                    if not isinstance(data[field], str) or not data[field].strip():
+                        self.send_json({"detail": f"Field '{field}' must be a non-empty string."}, status_code=400)
+                        return
+                    
+                input_title = data["title"].strip()
+                input_author = data["author"].strip()
+                input_genre = data["genre"].strip()
 
                 with psycopg.connect(books_db) as conn:
                     with conn.cursor() as cur:
@@ -305,6 +406,79 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         
         self.send_json({"detail": "Not Found"}, status_code = 404)
 
+    def do_PATCH(self):
+        # protect this route
+        if not self.is_authorized():
+            return
+
+        #match a variable route like: PATCH /book/12
+        match = re.match(r'^/book/(\d+)$', self.path)
+        if match:
+            book_id = int(match.group(1))
+            content_Length = int(self.headers['Content-Length'])
+            patch_data = self.rfile.read(content_Length).decode('utf-8')
+
+            try:
+                data = json.loads(patch_data)
+
+                # Ensure the user actually provided fields to update
+                if not data:
+                    self.send_json({"detail": "No fields provided for update"}, status_code=400)
+                    return
+                
+                update_fields = []
+                query_values = []
+
+                # Validation for PATCH
+                for field in ['title', 'author', 'genre']:
+                    if field in data:
+                        if not isinstance(data[field], str) or not data[field].strip():
+                            self.send_json({"detail": f"If providing '{field}', it must be a non-empty string."}, status_code=400)
+                            return
+                        update_fields.append(f"{field} = %s")
+                        query_values.append(data[field].strip())
+                    
+                if not update_fields:
+                    self.send_json({"detail": "No valid fields (title, author, genre) provided for update"}, status_code = 400)
+                    return
+                
+                
+                sql_set_clause = ", ".join(update_fields)
+                update_query = f"UPDATE books SET {sql_set_clause} WHERE id = %s RETURNING id, title, author, genre;"
+
+                # Append the book_id parameter to complete WHERE clause target
+                query_values.append(book_id)
+
+                with psycopg.connect(books_db) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(update_query, tuple(query_values))
+                        row = cur.fetchone()
+
+                        if row is None:
+                            self.send_json({"detail": f"Book with ID {book_id} not found"}, status_code = 404)
+                            return
+                        
+                        updated_book = {
+                            "id": row[0],
+                            "title": row[1],
+                            "author": row[2],
+                            "genre": row[3]
+                        }
+                        self.send_json(updated_book, status_code=200)
+                        return
+            except json.JSONDecodeError:
+                self.send_json({"detail": "Invalid JSON format in request body"}, status_code = 400)
+                return
+            except Exception as e:
+                print(f"Database error encountered during patch: {e}")
+                self.send_json({"detail": "Internal Server Error"}, status_code = 500)
+                return
+        
+        if self.path == '/books' or self.path == '/recommend' or self.path == '/search-external':
+            self.send_json({"detail": "Method Not Allowed. Use GET or POST instead."}, status_code = 405)
+            return
+        
+        self.send_json({"detail": "Not Found"}, status_code = 404)
 
 # Starts up the server stack and establishes the loop listening for socket transmissions
 def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port = 8080):
