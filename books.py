@@ -48,6 +48,10 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
 
     # Entry point for processing all incoming HTTP GET requests
     def do_GET(self):
+        # Authorize GET
+        if not self.is_authorized():
+            return
+
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         query_params = parse_qs(parsed_url.query)
@@ -260,7 +264,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                     # Create valid token for 1 hour
                     expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
                     token = jwt.encode({"user": "admin", "exp": expiration}, jwt_secret, algorithm="HS256")
-                    self.send_json({"message": "Login successfull", "access_token": token}, status_code = 200)
+                    self.send_json({"message": "Login successfull, token will last for 1 hour", "access_token": token}, status_code = 200)
                     return
                 else:
                     self.send_json({"detail": "Invalid username or password"}, status_code=401)
@@ -404,7 +408,6 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
             self.send_json({"detail": "Method Not Allowed. Use GET instead."}, status_code = 405)
             return
         
-        self.send_json({"detail": "Not Found"}, status_code = 404)
 
     def do_PATCH(self):
         # protect this route
