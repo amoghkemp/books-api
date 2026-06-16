@@ -9,26 +9,30 @@ import re
 import os
 from dotenv import load_dotenv
 
+# Initialize dotenv to read keys from the local .env configuration file
 load_dotenv()
 
+# Extract secret database credentials and external API configuration securely from environment variables
 books_db = os.getenv("books_db")
 big_book_api_key = os.getenv("big_book_api_key")
 big_book_url = os.getenv("big_book_url")
 
 class bookRequestsHandler(BaseHTTPRequestHandler):
 
+    # Utility helper method to package JSON responses and set standardized HTTP headers uniformly
     def send_json(self, data, status_code = 200):
         self.send_response(status_code)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps(data).encode('utf-8'))
 
+    # Entry point for processing all incoming HTTP GET requests
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         query_params = parse_qs(parsed_url.query)
 
-        # 1. GET /books
+        # 1. GET /books: Fetches and displays the entire local inventory sorted sequentially by ID
         if path == '/books':
             try:
                 with psycopg.connect(books_db) as conn:
@@ -52,7 +56,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 self.send_json({"detail": "Internal Server Error"}, status_code=500)
                 return
 
-        # 2. GET /recommend
+        # 2. GET /recommend: Filters local inventory dynamically using a case-insensitive genre query parameter
         elif path == '/recommend':
             genre_list = query_params.get('genre')
 
@@ -83,7 +87,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 self.send_json({"detail": "Internal Server Error"}, status_code = 500)
                 return
         
-        # 3. GET /search-external
+        # 3. GET /search-external: Queries the Big Book API and parses its specific complex nested array schema
         elif path == '/search-external':
             query_list = query_params.get('query')
             if not query_list:
@@ -92,12 +96,13 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
             user_query = query_list[0]
 
             try:
+                # Safely escape user text queries for secure URL transmission
                 encoded_query = urllib.parse.quote(user_query)
                 external_url = f"{big_book_url}?query={encoded_query}&api-key={big_book_api_key}"
 
                 print(f"Fetching from Big book API: {external_url}")
 
-                # create a fake browser request
+                # Attach browser headers to prevent security firewalls from blocking python-urllib connections
                 req = urllib.request.Request(
                     external_url,
                     headers = {
@@ -112,14 +117,18 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 external_books = external_data.get('books', [])
                 formatted_results = []
                 
+                # Navigate Big Book API's response structure (Iterating over nested list of edition groups)
                 for edition_group in external_books:
                     if len(edition_group) == 0:
                         continue
+                    # Grab the primary edition dictionary out of the nested array grouping
                     book_data = edition_group[0]
 
+                    # Parse out the authors list which contains dictionaries mapping names
                     authors_list = book_data.get('authors', [])
                     author_name = authors_list[0].get('name', 'Unknown') if authors_list else 'Unknown'
 
+                    # Extract the sub-dictionary containing the key rating score metric
                     rating = book_data.get('rating', 'Unknown')
                     rating = rating['average']
                     formatted_results.append({
@@ -132,16 +141,18 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 self.send_json({"source": "Big Book API", "results": formatted_results})
                 return
             
+            # Catches explicit upstream API structural rejections or validation failure error numbers
             except urllib.error.HTTPError as he:
                 print(f"External API HTTP Error: {he.code} - {he.reason}")
                 self.send_json({"detail": "Failed to get records from external book registry"}, status_code = he.code)
                 return
+            # Catches unexpected script code errors like KeyErrors or type mismatches
             except Exception as e:
                 print(f"Error calling external API {e}")
                 self.send_json({"detail": "Internal Server Error during external tracking lookup"}, status_code = 500)
                 return
 
-        # 4. GET /book/{id}
+        # 4. GET /book/{id}: Uses RegEx to match a variable trailing digit parameter route
         else:
             match = re.match(r'^/book/(\d+)$', self.path)
             if match:
@@ -170,10 +181,12 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                     self.send_json({"detail": "Internal Server Error"}, status_code = 500)
                     return
             
-            # If it's not any of the routes above, explicitly return a 404
+            # Catch-all route handler for unmatched or broken GET request string patterns
             self.send_json({"detail": "Not Found"}, status_code = 404)
 
+    # Entry point for processing all incoming HTTP POST requests
     def do_POST(self):
+        # POST /books: Validates incoming payloads and saves a unique new book record to the local database
         if self.path == '/books':
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length).decode('utf-8')
@@ -190,6 +203,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
 
                 with psycopg.connect(books_db) as conn:
                     with conn.cursor() as cur:
+                        # Prevent duplicate entry creation through strict conditional constraint matching
                         check_query = """
                             SELECT id FROM books
                             WHERE LOWER(title) = LOWER(%s)
@@ -210,7 +224,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                         """
                         cur.execute(insert_query, (input_title, input_author, input_genre))
                         
-                        # get new id
+                        # Fetch the database-generated auto-incremented primary key index
                         result = cur.fetchone()
                         if result is None:
                             print("Error: database executed INSERT but RETURNING id came back empty")
@@ -235,6 +249,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 self.send_json({"detail": "Internal Server Error"}, status_code = 500)
                 return
             
+        # Rejects valid paths attempting actions on unsupported HTTP verbs
         if self.path == '/recommend' or self.path == '/search-external' or re.match(r'^/book/(\d+)$', self.path):
             self.send_json({"detail": "Method Not Allowed. Use GET instead."}, status_code = 405)
             return
@@ -243,7 +258,9 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         self.send_json({"detail": "Not Found"}, status_code = 404)
 
     
+    # Entry point for processing all incoming HTTP DELETE requests
     def do_DELETE(self):
+        # DELETE /books: Locates matching values and purges them completely from table space
         if self.path == '/books':
             content_length = int(self.headers['Content-Length'])
             delete_data = self.rfile.read(content_length).decode('utf-8')
@@ -266,6 +283,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                             AND LOWER(genre) = LOWER(%s);
                         """
                         cur.execute(delete_query, (input_title, input_author, input_genre))
+                        # Inspect the modification driver counter to confirm if row deletion took place
                         deleted_rows_count = cur.rowcount
 
                         if deleted_rows_count == 0:
@@ -280,6 +298,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 self.send_json({"detail": "Internal server Error"}, status_code = 500)
                 return
         
+        # Guard clause returning a 405 response error for endpoints that do not accept DELETE methods
         if self.path == '/recommend' or self.path == '/search-external' or re.match(r'^/book/(\d+)$', self.path):
             self.send_json({"detail": "Method Not Allowed. Use GET instead."}, status_code = 405)
             return
@@ -287,12 +306,14 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         self.send_json({"detail": "Not Found"}, status_code = 404)
 
 
+# Starts up the server stack and establishes the loop listening for socket transmissions
 def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port = 8080):
     server_address = ('', port)
     httpd = server_class(server_address, handler_class)
     print(f"Server successfully running on http://localhost:{port}...")
     try:
         httpd.serve_forever()
+    # Intercepts Ctrl+C events in the terminal environment to shutdown cleanly without leaking network ports
     except KeyboardInterrupt:
         print("\nStopping server...")
         httpd.server_close()
