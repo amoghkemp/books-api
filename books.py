@@ -359,54 +359,36 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         if not self.is_authorized():
             return
 
-        # DELETE /books: Locates matching values and purges them completely from table space
-        if self.path == '/books':
-            content_length = int(self.headers['Content-Length'])
-            delete_data = self.rfile.read(content_length).decode('utf-8')
+        # DELETE /books/{ID} deletes book based on id uses regex
+        match = re.match(r'^/book/(\d+)$', self.path)
+        if match:
+            book_id = int(match.group(1))
 
             try:
-                data = json.loads(delete_data)
-                # Validation checks
-                for field in ['title', 'author', 'genre']:
-                    if field not in data:
-                        self.send_json({"detail": f"Missing required field: {field}"}, status_code=400)
-                        return
-                    if not isinstance(data[field], str) or not data[field].strip():
-                        self.send_json({"detail": f"Field '{field}' must be a non-empty string."}, status_code=400)
-                        return
-                    
-                input_title = data["title"].strip()
-                input_author = data["author"].strip()
-                input_genre = data["genre"].strip()
-
                 with psycopg.connect(books_db) as conn:
                     with conn.cursor() as cur:
-                        delete_query = """
-                            DELETE FROM books
-                            WHERE LOWER(title) = LOWER(%s)
-                            AND LOWER(author) = LOWER(%s)
-                            AND LOWER(genre) = LOWER(%s);
-                        """
-                        cur.execute(delete_query, (input_title, input_author, input_genre))
+                        delete_query = "DELETE FROM books WHERE id = %s;"
+                        cur.execute(delete_query, (book_id,))
                         # Inspect the modification driver counter to confirm if row deletion took place
                         deleted_rows_count = cur.rowcount
 
                         if deleted_rows_count == 0:
-                            self.send_json({"detail": "No matching books found to delete."}, status_code = 404)
+                            self.send_json({"detail": f"Book with ID {book_id} not found."}, status_code = 404)
                             return
-                        self.send_json({"detail": f"Successfully deleted {deleted_rows_count} books matching your criteria."}, status_code = 200)
+                        self.send_json({"detail": f"Successfully deleted book with ID {book_id}."}, status_code = 200)
+                        return
 
-            except json.JSONDecodeError:
-                self.send_json({"detail": "Invalid JSON format in request body"}, status_code = 400)
             except Exception as e:
                 print(f"Database error encountered: {e}")
                 self.send_json({"detail": "Internal server Error"}, status_code = 500)
                 return
         
         # Guard clause returning a 405 response error for endpoints that do not accept DELETE methods
-        if self.path == '/recommend' or self.path == '/search-external' or re.match(r'^/book/(\d+)$', self.path):
+        if self.path == '/recommend' or self.path == '/search-external' or self.path == '/books':
             self.send_json({"detail": "Method Not Allowed. Use GET instead."}, status_code = 405)
             return
+        
+        self.send_json({"detail": "Not Found"}, status_code = 404)
         
 
     def do_PATCH(self):
