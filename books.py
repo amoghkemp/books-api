@@ -10,9 +10,16 @@ import os
 import jwt
 import datetime
 from dotenv import load_dotenv
+import redis
 
 # Initialize dotenv to read keys from the local .env configuration file
 load_dotenv()
+
+redis_client = redis.Redis(
+    host = os.getenv("redis_host"),
+    port = int(os.getenv("redis_port")),
+    decode_responses=True
+)
 
 # Extract secret database credentials and external API configuration securely from environment variables
 books_db = os.getenv("books_db")
@@ -223,6 +230,16 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
             match = re.match(r'^/book/(\d+)$', self.path)
             if match:
                 book_id = int(match.group(1))
+
+                cache_key = f"book:{book_id}"
+                cached_book = redis_client.get(cache_key)
+
+                if cached_book:
+                    print(f"Cache hit: {cache_key}")
+                    self.send_json(json.loads(cached_book))
+                    return
+                print(f"Cache miss: {cache_key}")
+
                 try:
                     with psycopg.connect(books_db) as conn:
                         with conn.cursor() as cur:
@@ -240,6 +257,13 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                                 "author": row[2],
                                 "genre": row[3]
                             }
+
+                            redis_client.set(
+                                cache_key,
+                                json.dumps(book_data),
+                                ex = 3600
+                            )
+
                             self.send_json(book_data)
                             return
                 except Exception as e:
@@ -262,7 +286,10 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 # hardcoded dummey authentication check
                 if data.get("username") == "admin" and data.get("password") == "password123":
                     # Create valid token for 1 hour
-                    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+                    expiration = (
+                        datetime.datetime.now(datetime.UTC)
+                        + datetime.timedelta(hours=1)
+                    )
                     token = jwt.encode({"user": "admin", "exp": expiration}, jwt_secret, algorithm="HS256")
                     self.send_json({"message": "Login successfull, token will last for 1 hour", "access_token": token}, status_code = 200)
                     return
@@ -335,6 +362,13 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                             "genre": input_genre
                         }
 
+                        redis_client.set(
+                            f"book: {new_id}",
+                            json.dumps(new_book),
+                            ex = 3600
+                        )
+                        print(f"Cache created: book:{new_id}, (TTL=3600s)")
+
                         self.send_json(new_book, status_code = 201)
                         return
             except json.JSONDecodeError:
@@ -375,6 +409,10 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                         if deleted_rows_count == 0:
                             self.send_json({"detail": f"Book with ID {book_id} not found."}, status_code = 404)
                             return
+                        
+                        redis_client.delete(f"book: {book_id}")
+                        print(f"Cache deleted book: book:{book_id}, (TTL=3600s)")
+
                         self.send_json({"detail": f"Successfully deleted book with ID {book_id}."}, status_code = 200)
                         return
 
@@ -449,6 +487,14 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                             "author": row[2],
                             "genre": row[3]
                         }
+
+                        redis_client.set(
+                            f"book: {book_id}",
+                            json.dumps(updated_book),
+                            ex = 3600
+                        )
+                        print(f"Cache updated: book:{book_id}, (TTL=3600s)")
+
                         self.send_json(updated_book, status_code=200)
                         return
             except json.JSONDecodeError:
