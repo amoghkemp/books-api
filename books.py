@@ -26,6 +26,7 @@ books_db = os.getenv("books_db")
 big_book_api_key = os.getenv("big_book_api_key")
 big_book_url = os.getenv("big_book_url")
 jwt_secret = os.getenv("JWT_SECRET", "fallback_secret_key")
+port = int(os.getenv("port", 8000))
 
 class bookRequestsHandler(BaseHTTPRequestHandler):
 
@@ -512,7 +513,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
         self.send_json({"detail": "Not Found"}, status_code = 404)
 
 # Starts up the server stack and establishes the loop listening for socket transmissions
-def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port = 8080):
+def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port=port):
     server_address = ('', port)
     httpd = server_class(server_address, handler_class)
     print(f"Server successfully running on http://localhost:{port}...")
