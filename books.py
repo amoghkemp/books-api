@@ -28,6 +28,8 @@ big_book_url = os.getenv("big_book_url")
 jwt_secret = os.getenv("JWT_SECRET", "fallback_secret_key")
 port = int(os.getenv("port", 8000))
 
+db_conn = psycopg.connect(books_db)
+
 class bookRequestsHandler(BaseHTTPRequestHandler):
 
     # Utility helper method to package JSON responses and set standardized HTTP headers uniformly
@@ -80,28 +82,27 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 # calculates offset
                 offset = (page - 1) * limit
 
-                with psycopg.connect(books_db) as conn:
-                    with conn.cursor() as cur:
-                        # pass limit and offset dynamically to SQL
-                        query = "Select id, title, author, genre FROM books ORDER by id ASC LIMIT %s OFFSET %s;"
-                        cur.execute(query, (limit, offset))
-                        rows = cur.fetchall()
+                with db_conn.cursor() as cur:
+                    # pass limit and offset dynamically to SQL
+                    query = "Select id, title, author, genre FROM books ORDER by id ASC LIMIT %s OFFSET %s;"
+                    cur.execute(query, (limit, offset))
+                    rows = cur.fetchall()
 
-                        all_books = []
-                        for row in rows:
-                            all_books.append({
-                                "id": row[0],
-                                "title": row[1],
-                                "author": row[2],
-                                "genre": row[3]
-                            })
-                        self.send_json({
-                            "page": page,
-                            "limit": limit,
-                            "total_returned": len(all_books),
-                            "results": all_books
+                    all_books = []
+                    for row in rows:
+                        all_books.append({
+                            "id": row[0],
+                            "title": row[1],
+                            "author": row[2],
+                            "genre": row[3]
                         })
-                        return
+                    self.send_json({
+                        "page": page,
+                        "limit": limit,
+                        "total_returned": len(all_books),
+                        "results": all_books
+                    })
+                    return
             except Exception as e:
                 print(f"Database error encountered: {e}")
                 self.send_json({"detail": "Internal Server Error"}, status_code=500)
@@ -129,33 +130,32 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 
                 offset = (page - 1) * limit 
 
-                with psycopg.connect(books_db) as conn:
-                    with conn.cursor() as cur:
-                        query = """
-                            SELECT id, title, author, genre FROM books
-                            WHERE LOWER(genre) = LOWER(%s)
-                            ORDER BY id ASC
-                            LIMIT %s OFFSET %s
-                        """
-                        cur.execute(query, (requested_genre, limit, offset))
-                        rows = cur.fetchall()
+                with db_conn.cursor() as cur:
+                    query = """
+                        SELECT id, title, author, genre FROM books
+                        WHERE LOWER(genre) = LOWER(%s)
+                        ORDER BY id ASC
+                        LIMIT %s OFFSET %s
+                    """
+                    cur.execute(query, (requested_genre, limit, offset))
+                    rows = cur.fetchall()
 
-                        recommendations = []
-                        for row in rows:
-                            recommendations.append({
-                                "id": row[0],
-                                "title": row[1],
-                                "author": row[2],
-                                "genre": row[3]
-                            })
-                        self.send_json({
-                            "filter": requested_genre,
-                            "page": page,
-                            "limit": limit,
-                            "total_returned": len(recommendations),
-                            "results": recommendations
+                    recommendations = []
+                    for row in rows:
+                        recommendations.append({
+                            "id": row[0],
+                            "title": row[1],
+                            "author": row[2],
+                            "genre": row[3]
                         })
-                        return
+                    self.send_json({
+                        "filter": requested_genre,
+                        "page": page,
+                        "limit": limit,
+                        "total_returned": len(recommendations),
+                        "results": recommendations
+                    })
+                    return
             except Exception as e:
                 print(f"Database error encountered: {e}")
                 self.send_json({"detail": "Internal Server Error"}, status_code = 500)
@@ -242,31 +242,30 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 print(f"Cache miss: {cache_key}")
 
                 try:
-                    with psycopg.connect(books_db) as conn:
-                        with conn.cursor() as cur:
-                            query = "SELECT id, title, author, genre FROM books WHERE id = %s;"
-                            cur.execute(query, (book_id,))
-                            row = cur.fetchone()
+                    with db_conn.cursor() as cur:
+                        query = "SELECT id, title, author, genre FROM books WHERE id = %s;"
+                        cur.execute(query, (book_id,))
+                        row = cur.fetchone()
 
-                            if row is None:
-                                self.send_json({"detail": f"Book with ID {book_id} not found"}, status_code = 404)
-                                return
-                            
-                            book_data = {
-                                "id": row[0],
-                                "title": row[1],
-                                "author": row[2],
-                                "genre": row[3]
-                            }
-
-                            redis_client.set(
-                                cache_key,
-                                json.dumps(book_data),
-                                ex = 3600
-                            )
-
-                            self.send_json(book_data)
+                        if row is None:
+                            self.send_json({"detail": f"Book with ID {book_id} not found"}, status_code = 404)
                             return
+                        
+                        book_data = {
+                            "id": row[0],
+                            "title": row[1],
+                            "author": row[2],
+                            "genre": row[3]
+                        }
+
+                        redis_client.set(
+                            cache_key,
+                            json.dumps(book_data),
+                            ex = 3600
+                        )
+
+                        self.send_json(book_data)
+                        return
                 except Exception as e:
                     print(f"Database error encountered: {e}")
                     self.send_json({"detail": "Internal Server Error"}, status_code = 500)
@@ -325,53 +324,53 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 input_author = data["author"]
                 input_genre = data["genre"]
 
-                with psycopg.connect(books_db) as conn:
-                    with conn.cursor() as cur:
-                        # Prevent duplicate entry creation through strict conditional constraint matching
-                        check_query = """
-                            SELECT id FROM books
-                            WHERE LOWER(title) = LOWER(%s)
-                            AND LOWER(author) = LOWER(%s)
-                            AND LOWER(genre) = LOWER(%s);
-                        """
-                        cur.execute(check_query, (input_title, input_author, input_genre))
-                        existing_book = cur.fetchone()
+                with db_conn.cursor() as cur:
+                    # Prevent duplicate entry creation through strict conditional constraint matching
+                    check_query = """
+                        SELECT id FROM books
+                        WHERE LOWER(title) = LOWER(%s)
+                        AND LOWER(author) = LOWER(%s)
+                        AND LOWER(genre) = LOWER(%s);
+                    """
+                    cur.execute(check_query, (input_title, input_author, input_genre))
+                    existing_book = cur.fetchone()
 
-                        if existing_book is not None:
-                            self.send_json({"detail": f"The book '{input_title}' already exists in the database."}, status_code = 409)
-                            return
-                        
-                        insert_query = """
-                            INSERT INTO books (title, author, genre)
-                            VALUES (%s, %s, %s)
-                            RETURNING id;
-                        """
-                        cur.execute(insert_query, (input_title, input_author, input_genre))
-                        
-                        # Fetch the database-generated auto-incremented primary key index
-                        result = cur.fetchone()
-                        if result is None:
-                            print("Error: database executed INSERT but RETURNING id came back empty")
-                            self.send_json({"detail": "Database failed to return new book ID"}, status_code = 500)
-                            return
-                        new_id = result[0]
-
-                        new_book = {
-                            "id": new_id,
-                            "title": input_title,
-                            "author": input_author,
-                            "genre": input_genre
-                        }
-
-                        redis_client.set(
-                            f"book: {new_id}",
-                            json.dumps(new_book),
-                            ex = 3600
-                        )
-                        print(f"Cache created: book:{new_id}, (TTL=3600s)")
-
-                        self.send_json(new_book, status_code = 201)
+                    if existing_book is not None:
+                        self.send_json({"detail": f"The book '{input_title}' already exists in the database."}, status_code = 409)
                         return
+                    
+                    insert_query = """
+                        INSERT INTO books (title, author, genre)
+                        VALUES (%s, %s, %s)
+                        RETURNING id;
+                    """
+                    cur.execute(insert_query, (input_title, input_author, input_genre))
+                    db_conn.commit()
+                    
+                    # Fetch the database-generated auto-incremented primary key index
+                    result = cur.fetchone()
+                    if result is None:
+                        print("Error: database executed INSERT but RETURNING id came back empty")
+                        self.send_json({"detail": "Database failed to return new book ID"}, status_code = 500)
+                        return
+                    new_id = result[0]
+
+                    new_book = {
+                        "id": new_id,
+                        "title": input_title,
+                        "author": input_author,
+                        "genre": input_genre
+                    }
+
+                    redis_client.set(
+                        f"book: {new_id}",
+                        json.dumps(new_book),
+                        ex = 3600
+                    )
+                    print(f"Cache created: book:{new_id}, (TTL=3600s)")
+
+                    self.send_json(new_book, status_code = 201)
+                    return
             except json.JSONDecodeError:
                 self.send_json({"detail": "Invalid JSON format in request body"}, status_code = 400)
                 return
@@ -400,22 +399,23 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
             book_id = int(match.group(1))
 
             try:
-                with psycopg.connect(books_db) as conn:
-                    with conn.cursor() as cur:
-                        delete_query = "DELETE FROM books WHERE id = %s;"
-                        cur.execute(delete_query, (book_id,))
-                        # Inspect the modification driver counter to confirm if row deletion took place
-                        deleted_rows_count = cur.rowcount
+                with db_conn.cursor() as cur:
+                    delete_query = "DELETE FROM books WHERE id = %s;"
+                    cur.execute(delete_query, (book_id,))
+                    db_conn.commit()
 
-                        if deleted_rows_count == 0:
-                            self.send_json({"detail": f"Book with ID {book_id} not found."}, status_code = 404)
-                            return
-                        
-                        redis_client.delete(f"book: {book_id}")
-                        print(f"Cache deleted book: book:{book_id}, (TTL=3600s)")
+                    # Inspect the modification driver counter to confirm if row deletion took place
+                    deleted_rows_count = cur.rowcount
 
-                        self.send_json({"detail": f"Successfully deleted book with ID {book_id}."}, status_code = 200)
+                    if deleted_rows_count == 0:
+                        self.send_json({"detail": f"Book with ID {book_id} not found."}, status_code = 404)
                         return
+                    
+                    redis_client.delete(f"book: {book_id}")
+                    print(f"Cache deleted book: book:{book_id}, (TTL=3600s)")
+
+                    self.send_json({"detail": f"Successfully deleted book with ID {book_id}."}, status_code = 200)
+                    return
 
             except Exception as e:
                 print(f"Database error encountered: {e}")
@@ -473,31 +473,32 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                 # Append the book_id parameter to complete WHERE clause target
                 query_values.append(book_id)
 
-                with psycopg.connect(books_db) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(update_query, tuple(query_values))
-                        row = cur.fetchone()
+                with db_conn.cursor() as cur:
+                    cur.execute(update_query, tuple(query_values))
+                    db_conn.commit()
 
-                        if row is None:
-                            self.send_json({"detail": f"Book with ID {book_id} not found"}, status_code = 404)
-                            return
-                        
-                        updated_book = {
-                            "id": row[0],
-                            "title": row[1],
-                            "author": row[2],
-                            "genre": row[3]
-                        }
+                    row = cur.fetchone()
 
-                        redis_client.set(
-                            f"book: {book_id}",
-                            json.dumps(updated_book),
-                            ex = 3600
-                        )
-                        print(f"Cache updated: book:{book_id}, (TTL=3600s)")
-
-                        self.send_json(updated_book, status_code=200)
+                    if row is None:
+                        self.send_json({"detail": f"Book with ID {book_id} not found"}, status_code = 404)
                         return
+                    
+                    updated_book = {
+                        "id": row[0],
+                        "title": row[1],
+                        "author": row[2],
+                        "genre": row[3]
+                    }
+
+                    redis_client.set(
+                        f"book: {book_id}",
+                        json.dumps(updated_book),
+                        ex = 3600
+                    )
+                    print(f"Cache updated: book:{book_id}, (TTL=3600s)")
+
+                    self.send_json(updated_book, status_code=200)
+                    return
             except json.JSONDecodeError:
                 self.send_json({"detail": "Invalid JSON format in request body"}, status_code = 400)
                 return
@@ -524,5 +525,32 @@ def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port=por
         print("\nStopping server...")
         httpd.server_close()
 
+def check_dependencies():
+    try:
+        # postgres check
+        with db_conn.cursor() as cur:
+            cur.execute("Select 1;")
+            cur.fetchone()
+
+        print("Postgres connection successful")
+    
+    except Exception as e:
+        print(f"Postgres connection failed: {e}")
+        return False
+    
+    try:
+        # redis check
+        redis_client.ping()
+        print("Redis conection successful")
+    except Exception as e:
+        print(f"Redis connection failed: {e}")
+        return False
+
+    return True
+
 if __name__ == '__main__':
+    if not check_dependencies():
+        print("Server startup aborted")
+        exit(1)
+
     run()
