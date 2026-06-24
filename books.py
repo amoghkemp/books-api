@@ -523,7 +523,11 @@ def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port=por
     # Intercepts Ctrl+C events in the terminal environment to shutdown cleanly without leaking network ports
     except KeyboardInterrupt:
         print("\nStopping server...")
+        redis_client.close()
+        db_conn.close()
         httpd.server_close()
+        
+
 
 def check_dependencies():
     try:
