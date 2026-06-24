@@ -363,7 +363,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                     }
 
                     redis_client.set(
-                        f"book: {new_id}",
+                        f"book:{new_id}",
                         json.dumps(new_book),
                         ex = 3600
                     )
@@ -411,7 +411,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                         self.send_json({"detail": f"Book with ID {book_id} not found."}, status_code = 404)
                         return
                     
-                    redis_client.delete(f"book: {book_id}")
+                    redis_client.delete(f"book:{book_id}")
                     print(f"Cache deleted book: book:{book_id}, (TTL=3600s)")
 
                     self.send_json({"detail": f"Successfully deleted book with ID {book_id}."}, status_code = 200)
@@ -491,7 +491,7 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                     }
 
                     redis_client.set(
-                        f"book: {book_id}",
+                        f"book:{book_id}",
                         json.dumps(updated_book),
                         ex = 3600
                     )
