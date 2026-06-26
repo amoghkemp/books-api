@@ -11,7 +11,7 @@ import jwt
 import datetime
 from dotenv import load_dotenv
 import redis
-import google.generativeai as genai
+from llm.factory import create_llm
 
 # Initialize dotenv to read keys from the local .env configuration file
 load_dotenv()
@@ -31,10 +31,7 @@ port = int(os.getenv("port", 8000))
 
 db_conn = psycopg.connect(books_db)
 
-genai.configure(
-    api_key=os.getenv("gemini_api_key")
-)
-gemini_model = genai.GenerativeModel("gemini-2.5-flash-lite")
+llm = create_llm()
 
 def generate_sql(user_query):
     prompt = f"""
@@ -45,14 +42,14 @@ table:
 books_large
 
 Columns:
-- isbn
-- book_title
-- book_author
-- year_of_publication
-- publisher
-- year_int
+- isbn (TEXT)
+- book_title (TEXT)
+- book_author (TEXT)
+- year_of_publication (TEXT, original data, do NOT use for numeric comparisons)
+- publisher (TEXT)
+- year_int (INTEGER, use this for >, <, >=, <=, BETWEEN, ORDER BY year)
 
-Generate ONLY a SQL SELECT statement.
+Generate ONLY a SQL SELECT statement(NO UNEEDED TEXT JUST THE SQL).
 
 Rules:
 - Query only books_large
@@ -64,13 +61,13 @@ User request:
 """
 
     
-    response = gemini_model.generate_content(prompt)
+    # response = gemini_model.generate_content(prompt)
     # sql = response.text.strip()
     # sql = sql.replace("```sql", "")
     # sql = sql.replace("```", "")
     # sql = sql.strip()
 
-    return response
+    return llm.generate(prompt)
 
 def confirm_sql(response_text):
     if not response_text:
@@ -140,9 +137,9 @@ Return ONLY JSON
     }}
 ]
 """
-    response = gemini_model.generate_content(prompt)
+    response = llm.generate(prompt)
 
-    response_test = response.text.strip()
+    response_test = response.strip()
     response_test = response_test.replace("```json", "")
     response_test = response_test.replace("```", "")
     response_test = response_test.strip()
@@ -514,8 +511,9 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                     return
 
                 response = generate_sql(user_query)
-                self.log_message("%s", response.text) # creates log of what LLM gives from prompt
-                sql = confirm_sql(response.text)
+                self.log_message("%s", response) # creates log of what LLM gives from prompt
+                sql = confirm_sql(response)
+                # self.log_message(sql)
                 validate_sql(sql)
 
                 with db_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -717,10 +715,10 @@ def check_dependencies():
     
     try:
         # gemini check
-        gemini_model.generate_content("Reply with ok")
-        print("Gemini Connection successful")
+        llm.generate("Reply with ok")
+        print("LLM Connection successful")
     except Exception as e:
-        print(f"Gemini Connection failed: {e}")
+        print(f"LLM Connection failed: {e}")
         return False
 
     return True
