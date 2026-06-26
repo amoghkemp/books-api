@@ -34,7 +34,7 @@ db_conn = psycopg.connect(books_db)
 genai.configure(
     api_key=os.getenv("gemini_api_key")
 )
-gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+gemini_model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
 def generate_sql(user_query):
     prompt = f"""
@@ -65,12 +65,30 @@ User request:
 
     
     response = gemini_model.generate_content(prompt)
-    sql = response.text.strip()
+    # sql = response.text.strip()
+    # sql = sql.replace("```sql", "")
+    # sql = sql.replace("```", "")
+    # sql = sql.strip()
+
+    return response
+
+def confirm_sql(response_text):
+    if not response_text:
+        raise Exception("LLM returned empty response")
+    
+    sql = response_text.strip()
     sql = sql.replace("```sql", "")
     sql = sql.replace("```", "")
     sql = sql.strip()
 
+    if not re.match(r"^\s*SELECT\b", sql, re.IGNORECASE):
+        raise Exception("LLM did not return a SQL statement")
+    
+    if sql.count(";") > 1:
+        raise Exception("Multiple SQL statements detected")
+    
     return sql
+
 
 def validate_sql(sql):
 
@@ -495,8 +513,9 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
                     self.send_json({"detail": "Missing query"},status_code = 400)
                     return
 
-                sql = generate_sql(user_query)
-                print(sql)
+                response = generate_sql(user_query)
+                self.log_message("%s", response.text) # creates log of what LLM gives from prompt
+                sql = confirm_sql(response.text)
                 validate_sql(sql)
 
                 with db_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
