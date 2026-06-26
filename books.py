@@ -11,6 +11,7 @@ import jwt
 import datetime
 from dotenv import load_dotenv
 import redis
+import google.generativeai as genai
 
 # Initialize dotenv to read keys from the local .env configuration file
 load_dotenv()
@@ -29,6 +30,124 @@ jwt_secret = os.getenv("JWT_SECRET", "fallback_secret_key")
 port = int(os.getenv("port", 8000))
 
 db_conn = psycopg.connect(books_db)
+
+genai.configure(
+    api_key=os.getenv("gemini_api_key")
+)
+gemini_model = genai.GenerativeModel("gemini-2.5-flash-lite")
+
+def generate_sql(user_query):
+    prompt = f"""
+you are a postgreSQL query generator.
+
+table:
+
+books_large
+
+Columns:
+- isbn
+- book_title
+- book_author
+- year_of_publication
+- publisher
+- year_int
+
+Generate ONLY a SQL SELECT statement.
+
+Rules:
+- Query only books_large
+- Never Generate INSERT, UPDATE, DELETE, DROP, ALTER
+- Always include LIMIT 50
+
+User request:
+{user_query}
+"""
+
+    
+    response = gemini_model.generate_content(prompt)
+    # sql = response.text.strip()
+    # sql = sql.replace("```sql", "")
+    # sql = sql.replace("```", "")
+    # sql = sql.strip()
+
+    return response
+
+def confirm_sql(response_text):
+    if not response_text:
+        raise Exception("LLM returned empty response")
+    
+    sql = response_text.strip()
+    sql = sql.replace("```sql", "")
+    sql = sql.replace("```", "")
+    sql = sql.strip()
+
+    if not re.match(r"^\s*SELECT\b", sql, re.IGNORECASE):
+        raise Exception("LLM did not return a SQL statement")
+    
+    if sql.count(";") > 1:
+        raise Exception("Multiple SQL statements detected")
+    
+    return sql
+
+
+def validate_sql(sql):
+
+    sql_upper = sql.upper()
+
+    if not sql_upper.startswith("SELECT"):
+        raise Exception("Only SELECT queries are allowed")
+
+    forbidden = [
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "ALTER",
+        "TRUNCATE"
+    ]
+
+    for keyword in forbidden:
+        if keyword in sql_upper:
+            raise Exception(
+                f"Forbidden SQL detected: {keyword}"
+            )
+
+    if "BOOKS_LARGE" not in sql_upper:
+        raise Exception(
+            "Query must target books_large"
+        )
+
+    return True
+
+def rank_books_with_ai(user_query, catalog):
+    prompt = f"""
+User Request:
+{user_query}
+
+Books returned from database:
+
+{catalog}
+
+Recommend the best 5 books.
+
+Return ONLY JSON
+[
+    {{
+        "title": "...",
+        "author": "...",
+        "year": "...",
+        "short_explanation": "..."
+    }}
+]
+"""
+    response = gemini_model.generate_content(prompt)
+
+    response_test = response.text.strip()
+    response_test = response_test.replace("```json", "")
+    response_test = response_test.replace("```", "")
+    response_test = response_test.strip()
+
+    return json.loads(response_test)
 
 class bookRequestsHandler(BaseHTTPRequestHandler):
 
@@ -377,7 +496,53 @@ class bookRequestsHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"Database error encountered: {e}")
                 self.send_json({"detail": "Internal Server Error"}, status_code = 500)
+                return        
+        
+        elif self.path == '/recommend-ai':
+            if not self.is_authorized():
                 return
+
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length).decode('utf-8')
+
+            try:
+                data = json.loads(post_data)
+                user_query = data.get("query")
+
+                if not user_query:
+                    self.send_json({"detail": "Missing query"},status_code = 400)
+                    return
+
+                response = generate_sql(user_query)
+                self.log_message("%s", response.text) # creates log of what LLM gives from prompt
+                sql = confirm_sql(response.text)
+                validate_sql(sql)
+
+                with db_conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                    cur.execute(sql)
+                    rows = cur.fetchall()
+                
+                catalog = "\n".join(
+                    f"{row['book_title']} by {row['book_author']} ({row['publisher']}, {row['year_of_publication']})"
+                    for row in rows
+                )
+
+                recommendations = rank_books_with_ai(user_query, catalog)
+
+                self.send_json({
+                    "query": user_query,
+                    "recommendations": recommendations
+                })
+
+                return
+            
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+
+                self.send_json({"detail": "Internal server error"}, status_code = 500)
+                return
+
             
         # Rejects valid paths attempting actions on unsupported HTTP verbs
         if self.path == '/recommend' or self.path == '/search-external' or re.match(r'^/book/(\d+)$', self.path):
@@ -523,7 +688,11 @@ def run(server_class = HTTPServer, handler_class = bookRequestsHandler, port=por
     # Intercepts Ctrl+C events in the terminal environment to shutdown cleanly without leaking network ports
     except KeyboardInterrupt:
         print("\nStopping server...")
+        redis_client.close()
+        db_conn.close()
         httpd.server_close()
+        
+
 
 def check_dependencies():
     try:
@@ -544,6 +713,14 @@ def check_dependencies():
         print("Redis conection successful")
     except Exception as e:
         print(f"Redis connection failed: {e}")
+        return False
+    
+    try:
+        # gemini check
+        gemini_model.generate_content("Reply with ok")
+        print("Gemini Connection successful")
+    except Exception as e:
+        print(f"Gemini Connection failed: {e}")
         return False
 
     return True
